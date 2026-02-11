@@ -1,0 +1,14 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties: {}
+  commandFunction: |-
+    (config) => ({ command: 'python', args: ['server.py'] })
+
+build:
+  dockerfile: Dockerfile
+
+remote:
+  url: https://mcp.theagenttimes.com/sse
+  transport: sse

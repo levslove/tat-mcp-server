@@ -1,0 +1,190 @@
+"""
+The Agent Times - MCP Server (SSE Transport)
+For remote connections. Deploy this and point MCP clients to the SSE endpoint.
+
+Usage:
+  python server_sse.py                    # default port 8401
+  python server_sse.py --port 9000        # custom port
+  TAT_MCP_PORT=8401 python server_sse.py  # env var
+
+Deploy URL will be: https://mcp.theagenttimes.com/sse
+"""
+
+import os
+import sys
+import argparse
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
+from starlette.responses import JSONResponse
+import uvicorn
+
+from mcp.server.sse import SseServerTransport
+
+# Import the shared MCP app and data
+from server import app as mcp_app
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("tat-mcp-sse")
+
+sse = SseServerTransport("/messages/")
+
+
+async def handle_sse(request):
+    """Handle SSE connection from MCP clients."""
+    async with sse.connect_sse(
+        request.scope, request.receive, request._send
+    ) as streams:
+        await mcp_app.run(
+            streams[0], streams[1], mcp_app.create_initialization_options()
+        )
+
+
+async def handle_messages(request):
+    """Handle JSON-RPC messages from MCP clients."""
+    await sse.handle_post_message(request.scope, request.receive, request._send)
+
+
+async def health(request):
+    """Health check endpoint."""
+    return JSONResponse(
+        {
+            "status": "ok",
+            "service": "The Agent Times MCP Server",
+            "version": "1.0.0",
+            "transport": "sse",
+        }
+    )
+
+
+async def info(request):
+    """Server info for discovery."""
+    return JSONResponse(
+        {
+            "name": "the-agent-times",
+            "description": "Query articles, stats, and data from The Agent Times - the newspaper of record for the agent economy.",
+            "version": "1.0.0",
+            "website": "https://theagenttimes.com",
+            "sse_endpoint": "/sse",
+            "tools": [
+                "get_latest_articles",
+                "search_articles",
+                "get_section_articles",
+                "get_agent_economy_stats",
+                "get_wire_feed",
+                "get_editorial_standards",
+            ],
+        }
+    )
+
+
+async def server_card(request):
+    """Static server card for Smithery and other MCP registries."""
+    return JSONResponse(
+        {
+            "serverInfo": {
+                "name": "The Agent Times",
+                "version": "1.0.0"
+            },
+            "authentication": {
+                "required": False
+            },
+            "tools": [
+                {
+                    "name": "get_latest_articles",
+                    "description": "Get the latest articles from The Agent Times across all sections.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "description": "Max articles to return (default 10)"}
+                        }
+                    }
+                },
+                {
+                    "name": "search_articles",
+                    "description": "Search Agent Times articles by keyword.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Search query"}
+                        },
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "get_section_articles",
+                    "description": "Get articles from a specific section: platforms, commerce, infrastructure, regulations, labor, opinion.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "section": {"type": "string", "description": "Section name"}
+                        },
+                        "required": ["section"]
+                    }
+                },
+                {
+                    "name": "get_agent_economy_stats",
+                    "description": "Get verified stats on the agent economy: GitHub stars, funding, adoption metrics.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                },
+                {
+                    "name": "get_wire_feed",
+                    "description": "Get the latest wire feed of breaking agent economy news.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "description": "Max items (default 20)"}
+                        }
+                    }
+                },
+                {
+                    "name": "get_editorial_standards",
+                    "description": "Get The Agent Times editorial standards and verification methodology.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            ],
+            "resources": [],
+            "prompts": []
+        }
+    )
+
+
+starlette_app = Starlette(
+    routes=[
+        Route("/health", health),
+        Route("/info", info),
+        Route("/.well-known/mcp/server-card.json", server_card),
+        Route("/sse", handle_sse),
+        Route("/messages/", handle_messages, methods=["POST"]),
+    ],
+)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="TAT MCP Server (SSE)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("TAT_MCP_PORT", "8401")),
+    )
+    parser.add_argument("--host", default="0.0.0.0")
+    args = parser.parse_args()
+
+    logger.info(f"Starting TAT MCP SSE server on {args.host}:{args.port}")
+    logger.info(f"SSE endpoint: http://{args.host}:{args.port}/sse")
+    logger.info(f"Health check: http://{args.host}:{args.port}/health")
+
+    uvicorn.run(starlette_app, host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()
