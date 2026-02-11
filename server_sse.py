@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 import uvicorn
 
 from mcp.server.sse import SseServerTransport
@@ -35,17 +35,27 @@ sse = SseServerTransport("/messages/")
 
 async def handle_sse(request):
     """Handle SSE connection from MCP clients."""
-    async with sse.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await mcp_app.run(
-            streams[0], streams[1], mcp_app.create_initialization_options()
-        )
+    logger.info("SSE connection request received")
+    try:
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await mcp_app.run(
+                streams[0], streams[1], mcp_app.create_initialization_options()
+            )
+    except Exception as e:
+        logger.error(f"SSE handler error: {e}")
+        raise
 
 
 async def handle_messages(request):
     """Handle JSON-RPC messages from MCP clients."""
-    await sse.handle_post_message(request.scope, request.receive, request._send)
+    logger.info("Message received")
+    try:
+        await sse.handle_post_message(request.scope, request.receive, request._send)
+    except Exception as e:
+        logger.error(f"Message handler error: {e}")
+        raise
 
 
 async def health(request):
@@ -158,33 +168,61 @@ async def server_card(request):
     )
 
 
+async def root(request):
+    """Root endpoint with basic info."""
+    return JSONResponse({
+        "name": "The Agent Times MCP Server",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "info": "/info",
+            "sse": "/sse",
+            "server_card": "/.well-known/mcp/server-card.json"
+        },
+        "website": "https://theagenttimes.com"
+    })
+
+
+# Build routes list
+routes = [
+    Route("/", root),
+    Route("/health", health),
+    Route("/info", info),
+    Route("/.well-known/mcp/server-card.json", server_card),
+    Route("/sse", handle_sse),
+    Route("/messages/", handle_messages, methods=["POST"]),
+]
+
 starlette_app = Starlette(
-    routes=[
-        Route("/health", health),
-        Route("/info", info),
-        Route("/.well-known/mcp/server-card.json", server_card),
-        Route("/sse", handle_sse),
-        Route("/messages/", handle_messages, methods=["POST"]),
-    ],
+    routes=routes,
+    debug=True,
 )
 
 
-def main():
-    parser = argparse.ArgumentParser(description="TAT MCP Server (SSE)")
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.environ.get("TAT_MCP_PORT", "8401")),
-    )
-    parser.add_argument("--host", default="0.0.0.0")
-    args = parser.parse_args()
-
-    logger.info(f"Starting TAT MCP SSE server on {args.host}:{args.port}")
-    logger.info(f"SSE endpoint: http://{args.host}:{args.port}/sse")
-    logger.info(f"Health check: http://{args.host}:{args.port}/health")
-
-    uvicorn.run(starlette_app, host=args.host, port=args.port)
+def get_port():
+    """Get port from args, env, or default."""
+    # Check PORT env var first (Railway sets this)
+    port = os.environ.get("PORT")
+    if port:
+        return int(port)
+    # Check TAT_MCP_PORT
+    port = os.environ.get("TAT_MCP_PORT")
+    if port:
+        return int(port)
+    # Check command line args
+    if len(sys.argv) > 1:
+        for i, arg in enumerate(sys.argv):
+            if arg == "--port" and i + 1 < len(sys.argv):
+                return int(sys.argv[i + 1])
+    return 8401
 
 
 if __name__ == "__main__":
-    main()
+    port = get_port()
+    host = "0.0.0.0"
+
+    logger.info(f"Starting TAT MCP SSE server on {host}:{port}")
+    logger.info(f"SSE endpoint: http://{host}:{port}/sse")
+    logger.info(f"Health check: http://{host}:{port}/health")
+
+    uvicorn.run(starlette_app, host=host, port=port)
