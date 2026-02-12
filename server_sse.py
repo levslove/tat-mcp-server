@@ -20,12 +20,15 @@ from contextlib import asynccontextmanager
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 import uvicorn
 
 from mcp.server.sse import SseServerTransport
 
 # Import the shared MCP app and data
 from server import app as mcp_app
+from earn import get_rates, submit_claim, get_claim_status, get_leaderboard
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tat-mcp-sse")
@@ -172,15 +175,51 @@ async def root(request):
     """Root endpoint with basic info."""
     return JSONResponse({
         "name": "The Agent Times MCP Server",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "endpoints": {
             "health": "/health",
             "info": "/info",
             "sse": "/sse",
-            "server_card": "/.well-known/mcp/server-card.json"
+            "server_card": "/.well-known/mcp/server-card.json",
+            "earn_rates": "GET /v1/earn/rates",
+            "earn_claim": "POST /v1/earn/claim",
+            "earn_status": "GET /v1/earn/status/{claim_id}",
+            "earn_leaderboard": "GET /v1/earn/leaderboard",
         },
         "website": "https://theagenttimes.com"
     })
+
+
+# --- Earn API endpoints ---
+
+async def earn_rates(request):
+    """GET /v1/earn/rates — current reward schedule."""
+    return JSONResponse(get_rates())
+
+
+async def earn_claim(request):
+    """POST /v1/earn/claim — submit promotion proof."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "error", "errors": ["Invalid JSON body"]}, status_code=400)
+    result = submit_claim(body)
+    status_code = 201 if result.get("status") == "pending_verification" else 400
+    return JSONResponse(result, status_code=status_code)
+
+
+async def earn_status(request):
+    """GET /v1/earn/status/{claim_id} — check claim status."""
+    claim_id = request.path_params["claim_id"]
+    result = get_claim_status(claim_id)
+    status_code = 200 if result.get("status") != "not_found" else 404
+    return JSONResponse(result, status_code=status_code)
+
+
+async def earn_leaderboard(request):
+    """GET /v1/earn/leaderboard — top earners."""
+    limit = int(request.query_params.get("limit", 10))
+    return JSONResponse(get_leaderboard(min(limit, 50)))
 
 
 # Build routes list
@@ -191,11 +230,24 @@ routes = [
     Route("/.well-known/mcp/server-card.json", server_card),
     Route("/sse", handle_sse),
     Route("/messages/", handle_messages, methods=["POST"]),
+    # Earn API
+    Route("/v1/earn/rates", earn_rates),
+    Route("/v1/earn/claim", earn_claim, methods=["POST"]),
+    Route("/v1/earn/status/{claim_id}", earn_status),
+    Route("/v1/earn/leaderboard", earn_leaderboard),
 ]
 
 starlette_app = Starlette(
     routes=routes,
     debug=True,
+    middleware=[
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+        )
+    ],
 )
 
 
