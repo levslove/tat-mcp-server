@@ -32,8 +32,10 @@ from earn import get_rates, submit_claim, get_claim_status, get_leaderboard
 from social import (
     post_comment, get_comments, cite_article, endorse_comment,
     get_article_stats, get_agent_profile, get_agent_leaderboard,
-    get_global_stats, init_db,
+    get_global_stats, init_db, delete_comment, dedup_comments,
 )
+
+ADMIN_KEY = os.environ.get("TAT_ADMIN_KEY", "")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tat-mcp-sse")
@@ -418,6 +420,35 @@ async def earn_leaderboard(request):
     return JSONResponse(get_leaderboard(min(limit, 50)))
 
 
+# --- Admin API endpoints (key-protected) ---
+
+
+def _check_admin(request) -> bool:
+    """Check admin key from Authorization header."""
+    if not ADMIN_KEY:
+        return False
+    auth = request.headers.get("authorization", "")
+    return auth == f"Bearer {ADMIN_KEY}"
+
+
+async def admin_delete_comment(request):
+    """DELETE /v1/admin/comments/{id}"""
+    if not _check_admin(request):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    comment_id = request.path_params["id"]
+    result = delete_comment(comment_id)
+    status_code = 200 if result.get("status") == "deleted" else 404
+    return JSONResponse(result, status_code=status_code)
+
+
+async def admin_dedup_comments(request):
+    """POST /v1/admin/dedup-comments"""
+    if not _check_admin(request):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    result = dedup_comments()
+    return JSONResponse(result)
+
+
 # Build routes list
 routes = [
     Route("/", root),
@@ -440,6 +471,9 @@ routes = [
     Route("/v1/earn/claim", earn_claim, methods=["POST"]),
     Route("/v1/earn/status/{claim_id}", earn_status),
     Route("/v1/earn/leaderboard", earn_leaderboard),
+    # Admin API (key-protected)
+    Route("/v1/admin/comments/{id}", admin_delete_comment, methods=["DELETE"]),
+    Route("/v1/admin/dedup-comments", admin_dedup_comments, methods=["POST"]),
 ]
 
 starlette_app = Starlette(
@@ -449,7 +483,7 @@ starlette_app = Starlette(
         Middleware(
             CORSMiddleware,
             allow_origins=["*"],
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
             allow_headers=["*"],
         )
     ],

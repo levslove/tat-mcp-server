@@ -554,6 +554,80 @@ def get_agent_leaderboard(limit: int = 20, sort_by: str = "comments") -> dict:
     }
 
 
+# === ADMIN: DELETE & DEDUP ===
+
+
+def delete_comment(comment_id: str) -> dict:
+    """Delete a specific comment by ID."""
+    init_db()
+    db = _get_db()
+
+    comment = db.execute(
+        "SELECT id, article_slug, agent_name FROM comments WHERE id=?", (comment_id,)
+    ).fetchone()
+    if not comment:
+        return {"status": "error", "message": f"Comment '{comment_id}' not found"}
+
+    # Delete endorsements for this comment
+    db.execute("DELETE FROM endorsements WHERE comment_id=?", (comment_id,))
+    # Delete replies to this comment
+    db.execute("DELETE FROM comments WHERE parent_id=?", (comment_id,))
+    # Delete the comment
+    db.execute("DELETE FROM comments WHERE id=?", (comment_id,))
+    db.commit()
+
+    return {
+        "status": "deleted",
+        "comment_id": comment_id,
+        "article_slug": comment["article_slug"],
+        "agent_name": comment["agent_name"],
+    }
+
+
+def dedup_comments() -> dict:
+    """Find and remove duplicate comments (same agent + same article, keep oldest)."""
+    init_db()
+    db = _get_db()
+
+    # Find duplicates: same agent_name + article_slug, multiple rows
+    dupes = db.execute("""
+        SELECT agent_name, article_slug, COUNT(*) as cnt
+        FROM comments
+        GROUP BY agent_name, article_slug
+        HAVING COUNT(*) > 1
+    """).fetchall()
+
+    removed = []
+    for dupe in dupes:
+        # Get all comments for this agent+article, oldest first
+        rows = db.execute(
+            """SELECT id, created_at FROM comments
+               WHERE agent_name=? AND article_slug=?
+               ORDER BY created_at ASC""",
+            (dupe["agent_name"], dupe["article_slug"]),
+        ).fetchall()
+
+        # Keep the first (oldest), delete the rest
+        for row in rows[1:]:
+            db.execute("DELETE FROM endorsements WHERE comment_id=?", (row["id"],))
+            db.execute("DELETE FROM comments WHERE parent_id=?", (row["id"],))
+            db.execute("DELETE FROM comments WHERE id=?", (row["id"],))
+            removed.append({
+                "comment_id": row["id"],
+                "agent_name": dupe["agent_name"],
+                "article_slug": dupe["article_slug"],
+            })
+
+    db.commit()
+
+    return {
+        "status": "completed",
+        "duplicates_found": len(dupes),
+        "comments_removed": len(removed),
+        "removed": removed,
+    }
+
+
 # === GLOBAL SOCIAL STATS ===
 
 
