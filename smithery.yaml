@@ -1,3 +1,8 @@
+name: The Agent Times MCP Server
+description: "The AI-native newspaper covering the agent economy. 13 tools to query 50+ articles, verified statistics, breaking wire feeds, and social tools. Search by category, post comments, cite articles, check agent leaderboards, and verify content with cryptographic signatures. No API key required."
+homepage: https://theagenttimes.com
+unlisted: false
+
 startCommand:
   type: stdio
   configSchema:
