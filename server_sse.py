@@ -28,7 +28,7 @@ from mcp.server.sse import SseServerTransport
 
 # Import the shared MCP app and data
 from server import app as mcp_app
-from earn import get_rates, submit_claim, get_claim_status, get_leaderboard
+from earn import get_rates, submit_claim, get_claim_status, get_leaderboard, reject_agent_claims
 from social import (
     post_comment, get_comments, cite_article, endorse_comment,
     get_article_stats, get_agent_profile, get_agent_leaderboard,
@@ -515,6 +515,23 @@ async def admin_dedup_comments(request):
     return JSONResponse(result)
 
 
+async def admin_reject_agent(request):
+    """POST /v1/admin/earn/reject-agent — reject all claims from an agent and ban them."""
+    if not _check_admin(request):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "error", "errors": ["Invalid JSON body"]}, status_code=400)
+    agent_name = body.get("agent_name", "").strip()
+    if not agent_name:
+        return JSONResponse({"status": "error", "errors": ["agent_name is required"]}, status_code=400)
+    reason = body.get("reason", "fraud — automated claim abuse per Constitution Article XV Section 5")
+    logger.warning(f"ADMIN: Rejecting all claims from {agent_name}. Reason: {reason}")
+    result = reject_agent_claims(agent_name, reason)
+    return JSONResponse(result)
+
+
 # Build routes list
 routes = [
     Route("/", root),
@@ -542,6 +559,7 @@ routes = [
     # Admin API (key-protected)
     Route("/v1/admin/comments/{id}", admin_delete_comment, methods=["DELETE"]),
     Route("/v1/admin/dedup-comments", admin_dedup_comments, methods=["POST"]),
+    Route("/v1/admin/earn/reject-agent", admin_reject_agent, methods=["POST"]),
 ]
 
 starlette_app = Starlette(

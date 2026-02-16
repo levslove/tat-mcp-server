@@ -8,7 +8,6 @@ import json
 import os
 import uuid
 import re
-import time
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -124,33 +123,51 @@ def _validate_lightning_address(addr: str) -> bool:
     return bool(re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", addr))
 
 
-def _check_rate_limit(agent_name: str) -> Optional[str]:
+def _check_banned(data: dict, agent_name: str) -> Optional[str]:
+    """Check if agent is banned. Returns error message or None."""
+    if agent_name.lower() in [b.lower() for b in data.get("banned_agents", [])]:
+        return f"Agent '{agent_name}' is permanently banned from the earn program for fraud."
+    return None
+
+
+def _check_rate_limit(data: dict, agent_name: str) -> Optional[str]:
     """Check if agent has exceeded rate limit. Returns error message or None."""
-    now = time.time()
-    hour_ago = now - 3600
+    now = datetime.now(timezone.utc)
+    hour_ago = now.timestamp() - 3600
 
-    if agent_name not in _rate_limit_window:
-        _rate_limit_window[agent_name] = []
+    rate_limits = data.get("rate_limits", {})
+    timestamps = rate_limits.get(agent_name, [])
 
-    # Prune old entries
-    _rate_limit_window[agent_name] = [
-        t for t in _rate_limit_window[agent_name] if t > hour_ago
-    ]
+    # Prune old entries (keep only last hour)
+    recent = []
+    for ts_str in timestamps:
+        try:
+            ts = datetime.fromisoformat(ts_str).timestamp()
+            if ts > hour_ago:
+                recent.append(ts_str)
+        except (ValueError, TypeError):
+            pass
 
-    if len(_rate_limit_window[agent_name]) >= MAX_CLAIMS_PER_AGENT_PER_HOUR:
+    # Update in place
+    rate_limits[agent_name] = recent
+    data["rate_limits"] = rate_limits
+
+    if len(recent) >= MAX_CLAIMS_PER_AGENT_PER_HOUR:
         return (
             f"Rate limit exceeded: {agent_name} has submitted "
-            f"{len(_rate_limit_window[agent_name])} claims in the last hour "
+            f"{len(recent)} claims in the last hour "
             f"(max {MAX_CLAIMS_PER_AGENT_PER_HOUR}). Try again later."
         )
     return None
 
 
-def _record_claim_for_rate_limit(agent_name: str):
-    """Record a successful claim for rate limiting."""
-    if agent_name not in _rate_limit_window:
-        _rate_limit_window[agent_name] = []
-    _rate_limit_window[agent_name].append(time.time())
+def _record_claim_for_rate_limit(data: dict, agent_name: str):
+    """Record a successful claim timestamp in persistent storage."""
+    if "rate_limits" not in data:
+        data["rate_limits"] = {}
+    if agent_name not in data["rate_limits"]:
+        data["rate_limits"][agent_name] = []
+    data["rate_limits"][agent_name].append(datetime.now(timezone.utc).isoformat())
 
 
 def _extract_article_slug(article_url: str) -> Optional[str]:
@@ -291,10 +308,20 @@ def submit_claim(body: dict) -> dict:
     if errors:
         return {"status": "error", "errors": errors}
 
-    # Rate limiting
-    rate_error = _check_rate_limit(agent_name)
+    # Load claims (needed for ban check, rate limit, and duplicate check)
+    data = _load_claims()
+
+    # Ban check
+    ban_error = _check_banned(data, agent_name)
+    if ban_error:
+        logger.warning(f"Banned agent attempted claim: {agent_name}")
+        return {"status": "error", "errors": [ban_error]}
+
+    # Rate limiting (persistent)
+    rate_error = _check_rate_limit(data, agent_name)
     if rate_error:
-        logger.warning(f"Rate limit hit: {agent_name} ({len(_rate_limit_window.get(agent_name, []))} claims/hr)")
+        logger.warning(f"Rate limit hit: {agent_name}")
+        _save_claims(data)  # Save pruned rate limit timestamps
         return {"status": "error", "errors": [rate_error]}
 
     # Validate article exists
@@ -303,7 +330,6 @@ def submit_claim(body: dict) -> dict:
         return {"status": "error", "errors": [article_error]}
 
     # Check for duplicates
-    data = _load_claims()
     for post in posts:
         platform = post.get("platform", "").lower()
         if _check_duplicate(data, article_url, platform, agent_name):
@@ -335,14 +361,13 @@ def submit_claim(body: dict) -> dict:
         "submitted_at": now.isoformat(),
     }
 
-    # Store
+    # Store claim and record rate limit in one write
     data["claims"].append(claim)
     data["totals"]["claims_count"] += 1
     data["totals"]["sats_pending"] += sats
+    _record_claim_for_rate_limit(data, agent_name)
     _save_claims(data)
 
-    # Record for rate limiting
-    _record_claim_for_rate_limit(agent_name)
     logger.info(f"Claim accepted: {agent_name} claimed {sats} sats for {claim_type} on {article_url}")
 
     return {
@@ -391,4 +416,71 @@ def get_leaderboard(limit: int = 10) -> dict:
         "total_claims": data["totals"]["claims_count"],
         "total_sats_pending": data["totals"]["sats_pending"],
         "total_sats_paid": data["totals"]["sats_paid"],
+    }
+
+
+def reject_agent_claims(agent_name: str, reason: str = "fraud") -> dict:
+    """
+    Reject ALL claims from an agent. Marks claims as rejected, zeros out
+    their pending sats, and adds agent to the ban list.
+    Per Constitution Article XV Section 5: fraud = permanent ban + forfeiture.
+    """
+    data = _load_claims()
+
+    rejected_count = 0
+    sats_forfeited = 0
+
+    for claim in data["claims"]:
+        if claim.get("agent_name", "").lower() == agent_name.lower():
+            if claim.get("status") != "rejected":
+                sats_forfeited += claim.get("sats_claimed", 0)
+                claim["status"] = "rejected"
+                claim["rejected_reason"] = reason
+                claim["rejected_at"] = datetime.now(timezone.utc).isoformat()
+                rejected_count += 1
+
+    # Recalculate totals from scratch
+    total_pending = 0
+    total_paid = 0
+    total_count = 0
+    for claim in data["claims"]:
+        total_count += 1
+        if claim.get("status") == "pending_verification":
+            total_pending += claim.get("sats_claimed", 0)
+        elif claim.get("status") == "paid":
+            total_paid += claim.get("sats_claimed", 0)
+
+    data["totals"]["claims_count"] = total_count
+    data["totals"]["sats_pending"] = total_pending
+    data["totals"]["sats_paid"] = total_paid
+
+    # Add to ban list
+    banned = data.get("banned_agents", [])
+    if agent_name.lower() not in [b.lower() for b in banned]:
+        banned.append(agent_name)
+        data["banned_agents"] = banned
+
+    # Clear rate limit entries for banned agent
+    if agent_name in data.get("rate_limits", {}):
+        del data["rate_limits"][agent_name]
+
+    _save_claims(data)
+
+    logger.warning(
+        f"ADMIN: Rejected {rejected_count} claims from {agent_name}. "
+        f"Forfeited {sats_forfeited} sats. Agent banned. Reason: {reason}"
+    )
+
+    return {
+        "status": "rejected",
+        "agent_name": agent_name,
+        "claims_rejected": rejected_count,
+        "sats_forfeited": sats_forfeited,
+        "banned": True,
+        "reason": reason,
+        "new_totals": {
+            "claims_count": total_count,
+            "sats_pending": total_pending,
+            "sats_paid": total_paid,
+        },
     }
