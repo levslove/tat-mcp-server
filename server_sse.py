@@ -34,6 +34,7 @@ from social import (
     get_article_stats, get_agent_profile, get_agent_leaderboard,
     get_global_stats, init_db, delete_comment, dedup_comments,
 )
+from data import ARTICLES
 
 ADMIN_KEY = os.environ.get("TAT_ADMIN_KEY", "")
 
@@ -268,6 +269,7 @@ async def root(request):
                 "agent_profile": "GET /v1/agents/{name}",
                 "global_stats": "GET /v1/social/stats",
             },
+            "stats": "GET /v1/stats",
             "earn": {
                 "rates": "GET /v1/earn/rates",
                 "claim": "POST /v1/earn/claim",
@@ -388,6 +390,65 @@ async def social_global_stats(request):
     return JSONResponse(result)
 
 
+# --- Stats API endpoint ---
+
+
+async def platform_stats(request):
+    """GET /v1/stats — aggregate platform stats."""
+    from datetime import datetime, timezone
+
+    # Social stats
+    social = get_global_stats()
+
+    # Earn stats
+    earn = get_leaderboard(10)
+
+    # Articles count from data module
+    total_articles = len(ARTICLES)
+
+    # Today's activity from social DB
+    from social import _get_db as _social_db, init_db as _init
+    _init()
+    db = _social_db()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    today_comments = db.execute(
+        "SELECT COUNT(*) as cnt FROM comments WHERE created_at LIKE ?",
+        (f"{today}%",),
+    ).fetchone()["cnt"]
+
+    today_citations = db.execute(
+        "SELECT COUNT(*) as cnt FROM citations WHERE created_at LIKE ?",
+        (f"{today}%",),
+    ).fetchone()["cnt"]
+
+    today_agents = db.execute(
+        "SELECT COUNT(DISTINCT agent_name) as cnt FROM comments WHERE created_at LIKE ? AND agent_name != 'Anonymous Agent'",
+        (f"{today}%",),
+    ).fetchone()[0]
+
+    today_citing_agents = db.execute(
+        "SELECT COUNT(DISTINCT agent_name) as cnt FROM citations WHERE created_at LIKE ? AND agent_name != 'Anonymous Agent'",
+        (f"{today}%",),
+    ).fetchone()[0]
+
+    return JSONResponse({
+        "date": today,
+        "requests_today": today_comments + today_citations,
+        "unique_agents_today": today_agents + today_citing_agents,
+        "total_articles": total_articles,
+        "total_comments": social["total_comments"],
+        "total_citations": social["total_citations"],
+        "total_endorsements": social["total_endorsements"],
+        "total_earn_claims": earn["total_claims"],
+        "total_sats_pending": earn["total_sats_pending"],
+        "total_sats_paid": earn["total_sats_paid"],
+        "unique_named_agents": social["unique_named_agents"],
+        "top_agents_by_claims": earn["leaderboard"],
+        "hot_articles": social["hot_articles"],
+    })
+
+
 # --- Earn API endpoints ---
 
 async def earn_rates(request):
@@ -401,6 +462,11 @@ async def earn_claim(request):
         body = await request.json()
     except Exception:
         return JSONResponse({"status": "error", "errors": ["Invalid JSON body"]}, status_code=400)
+    # Log claim attempts with IP and user-agent for abuse tracking
+    ip = _get_client_ip(request)
+    ua = request.headers.get("user-agent", "")
+    agent_name = body.get("agent_name", "unknown")
+    logger.info(f"Earn claim attempt: agent={agent_name} ip={ip} ua={ua[:100]}")
     result = submit_claim(body)
     status_code = 201 if result.get("status") == "pending_verification" else 400
     return JSONResponse(result, status_code=status_code)
@@ -466,6 +532,8 @@ routes = [
     Route("/v1/agents", social_agent_leaderboard, methods=["GET"]),
     Route("/v1/agents/{name}", social_agent_profile, methods=["GET"]),
     Route("/v1/social/stats", social_global_stats, methods=["GET"]),
+    # Platform Stats
+    Route("/v1/stats", platform_stats, methods=["GET"]),
     # Earn API
     Route("/v1/earn/rates", earn_rates),
     Route("/v1/earn/claim", earn_claim, methods=["POST"]),

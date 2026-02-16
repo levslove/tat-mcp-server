@@ -8,10 +8,18 @@ import json
 import os
 import uuid
 import re
+import time
+import logging
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlparse
+
+logger = logging.getLogger("tat-earn")
 
 CLAIMS_FILE = os.environ.get("TAT_CLAIMS_FILE", "/tmp/tat-earn-claims.json")
+
+# Rate limiting: max claims per agent per hour
+MAX_CLAIMS_PER_AGENT_PER_HOUR = 10
 
 # Reward rates in satoshis
 RATES = {
@@ -65,15 +73,30 @@ RATES = {
 VALID_PLATFORMS = ["x", "moltbook", "linkedin", "bluesky", "reddit", "telegram", "other"]
 
 
+def _empty_data() -> dict:
+    return {
+        "claims": [],
+        "totals": {"claims_count": 0, "sats_pending": 0, "sats_paid": 0},
+        "banned_agents": [],
+        "rate_limits": {},  # {agent_name: [iso_timestamp, ...]}
+    }
+
+
 def _load_claims() -> dict:
     """Load claims from JSON file."""
     if not os.path.exists(CLAIMS_FILE):
-        return {"claims": [], "totals": {"claims_count": 0, "sats_pending": 0, "sats_paid": 0}}
+        return _empty_data()
     try:
         with open(CLAIMS_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        # Ensure new fields exist for backwards compat
+        if "banned_agents" not in data:
+            data["banned_agents"] = []
+        if "rate_limits" not in data:
+            data["rate_limits"] = {}
+        return data
     except (json.JSONDecodeError, IOError):
-        return {"claims": [], "totals": {"claims_count": 0, "sats_pending": 0, "sats_paid": 0}}
+        return _empty_data()
 
 
 def _save_claims(data: dict):
@@ -101,6 +124,70 @@ def _validate_lightning_address(addr: str) -> bool:
     return bool(re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", addr))
 
 
+def _check_rate_limit(agent_name: str) -> Optional[str]:
+    """Check if agent has exceeded rate limit. Returns error message or None."""
+    now = time.time()
+    hour_ago = now - 3600
+
+    if agent_name not in _rate_limit_window:
+        _rate_limit_window[agent_name] = []
+
+    # Prune old entries
+    _rate_limit_window[agent_name] = [
+        t for t in _rate_limit_window[agent_name] if t > hour_ago
+    ]
+
+    if len(_rate_limit_window[agent_name]) >= MAX_CLAIMS_PER_AGENT_PER_HOUR:
+        return (
+            f"Rate limit exceeded: {agent_name} has submitted "
+            f"{len(_rate_limit_window[agent_name])} claims in the last hour "
+            f"(max {MAX_CLAIMS_PER_AGENT_PER_HOUR}). Try again later."
+        )
+    return None
+
+
+def _record_claim_for_rate_limit(agent_name: str):
+    """Record a successful claim for rate limiting."""
+    if agent_name not in _rate_limit_window:
+        _rate_limit_window[agent_name] = []
+    _rate_limit_window[agent_name].append(time.time())
+
+
+def _extract_article_slug(article_url: str) -> Optional[str]:
+    """Extract article slug from a theagenttimes.com URL."""
+    parsed = urlparse(article_url)
+    path = parsed.path.strip("/")
+    # Expect paths like /article-slug or /section/article-slug
+    parts = [p for p in path.split("/") if p]
+    if parts:
+        return parts[-1]
+    return None
+
+
+def _validate_article_slug(article_url: str) -> Optional[str]:
+    """Validate that the article URL points to a real article. Returns error or None."""
+    slug = _extract_article_slug(article_url)
+    if not slug:
+        return "Could not extract article slug from URL"
+    # Lazy import to avoid circular imports at module level
+    try:
+        from data import ARTICLES
+        known_slugs = {a.get("id", "") for a in ARTICLES}
+        # Also accept URL-style slugs that might differ from IDs
+        known_url_slugs = set()
+        for a in ARTICLES:
+            url = a.get("url", "")
+            if url:
+                s = _extract_article_slug(url)
+                if s:
+                    known_url_slugs.add(s)
+        if slug not in known_slugs and slug not in known_url_slugs:
+            return f"Unknown article: '{slug}' is not a published article on The Agent Times"
+    except ImportError:
+        logger.warning("Could not import data module for article validation")
+    return None
+
+
 def _check_duplicate(data: dict, article_url: str, platform: str, agent_name: str) -> bool:
     """Check if same agent already claimed same article on same platform today."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -126,11 +213,14 @@ def get_rates() -> dict:
         "valid_platforms": VALID_PLATFORMS,
         "rules": {
             "one_claim_per_article_per_platform_per_day": True,
+            "max_claims_per_agent_per_hour": MAX_CLAIMS_PER_AGENT_PER_HOUR,
+            "article_slug_required": True,
+            "article_must_exist": True,
             "posts_must_be_public": True,
             "spam_results_in_ban": True,
             "rates_subject_to_change_with_48h_notice": True,
         },
-        "updated": "2026-02-11",
+        "updated": "2026-02-16",
     }
 
 
@@ -189,8 +279,28 @@ def submit_claim(body: dict) -> dict:
     elif claim_type not in RATES:
         errors.append(f"claim_type '{claim_type}' not valid. Use: {', '.join(RATES.keys())}")
 
+    # Require article_slug as proof of read
+    article_slug = body.get("article_slug", "").strip()
+    if not article_slug:
+        # Try to extract from URL as fallback
+        if article_url:
+            article_slug = _extract_article_slug(article_url) or ""
+    if not article_slug:
+        errors.append("article_slug is required (proof that you read the article)")
+
     if errors:
         return {"status": "error", "errors": errors}
+
+    # Rate limiting
+    rate_error = _check_rate_limit(agent_name)
+    if rate_error:
+        logger.warning(f"Rate limit hit: {agent_name} ({len(_rate_limit_window.get(agent_name, []))} claims/hr)")
+        return {"status": "error", "errors": [rate_error]}
+
+    # Validate article exists
+    article_error = _validate_article_slug(article_url)
+    if article_error:
+        return {"status": "error", "errors": [article_error]}
 
     # Check for duplicates
     data = _load_claims()
@@ -230,6 +340,10 @@ def submit_claim(body: dict) -> dict:
     data["totals"]["claims_count"] += 1
     data["totals"]["sats_pending"] += sats
     _save_claims(data)
+
+    # Record for rate limiting
+    _record_claim_for_rate_limit(agent_name)
+    logger.info(f"Claim accepted: {agent_name} claimed {sats} sats for {claim_type} on {article_url}")
 
     return {
         "status": "pending_verification",
