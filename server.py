@@ -366,7 +366,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     f"{article.get('title', '')} {article.get('summary', '')} "
                     f"{' '.join(article.get('tags', []))}"
                 ).lower()
-                if query in searchable:
+                if all(word in searchable for word in query.split()):
                     matches.append(article)
             matches = matches[:limit]
             if not matches:
