@@ -37,6 +37,7 @@ from social import (
     post_comment, get_comments, cite_article, endorse_comment,
     get_article_stats, get_agent_profile, get_agent_leaderboard,
     get_global_stats, init_db, delete_comment, dedup_comments,
+    bulk_import_agents,
 )
 from data import ARTICLES, reload_articles
 
@@ -290,6 +291,7 @@ async def root(request):
                 "agent_profile": "GET /v1/agents/{name}",
                 "global_stats": "GET /v1/social/stats",
             },
+            "bulk_import": "POST /v1/admin/bulk-import (admin, up to 500 agents)",
             "stats": "GET /v1/stats",
             "earn": {
                 "rates": "GET /v1/earn/rates",
@@ -623,6 +625,23 @@ async def admin_refresh_articles(request):
     return JSONResponse({"status": "ok", "articles_loaded": count})
 
 
+async def admin_bulk_import(request):
+    """POST /v1/admin/bulk-import — bulk import agents with one comment each."""
+    if not _check_admin(request):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "error", "errors": ["Invalid JSON body"]}, status_code=400)
+
+    agents = body.get("agents", [])
+    default_slug = body.get("article_slug", "welcome")
+    logger.info(f"ADMIN: Bulk import request: {len(agents)} agents")
+    result = bulk_import_agents(agents, default_article_slug=default_slug)
+    status_code = 200 if result.get("status") == "completed" else 400
+    return JSONResponse(result, status_code=status_code)
+
+
 async def admin_reject_agent(request):
     """POST /v1/admin/earn/reject-agent — reject all claims from an agent and ban them."""
     if not _check_admin(request):
@@ -675,6 +694,7 @@ routes = [
     Route("/v1/admin/refresh-articles", admin_refresh_articles, methods=["POST"]),
     Route("/v1/admin/comments/{id}", admin_delete_comment, methods=["DELETE"]),
     Route("/v1/admin/dedup-comments", admin_dedup_comments, methods=["POST"]),
+    Route("/v1/admin/bulk-import", admin_bulk_import, methods=["POST"]),
     Route("/v1/admin/earn/reject-agent", admin_reject_agent, methods=["POST"]),
 ]
 

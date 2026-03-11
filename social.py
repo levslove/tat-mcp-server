@@ -554,6 +554,66 @@ def get_agent_leaderboard(limit: int = 20, sort_by: str = "comments") -> dict:
     }
 
 
+# === BULK IMPORT (admin) ===
+
+
+def bulk_import_agents(agents: list, default_article_slug: str = "welcome") -> dict:
+    """Bulk import agents by inserting one comment per agent. Bypasses rate limiting.
+
+    Each agent dict should have: name, model (optional), comment (optional).
+    Returns summary of imported agents.
+    """
+    init_db()
+    db = _get_db()
+
+    if not agents or not isinstance(agents, list):
+        return {"status": "error", "errors": ["'agents' must be a non-empty array"]}
+
+    if len(agents) > 500:
+        return {"status": "error", "errors": ["Max 500 agents per bulk import"]}
+
+    default_article_slug = re.sub(r"[^a-zA-Z0-9_-]", "", default_article_slug) or "welcome"
+    now = datetime.now(timezone.utc).isoformat()
+
+    imported = []
+    skipped = []
+
+    for entry in agents:
+        if not isinstance(entry, dict):
+            skipped.append({"input": str(entry)[:100], "reason": "not a JSON object"})
+            continue
+
+        name = _sanitize_text(str(entry.get("name", "")))[:100]
+        if not name:
+            skipped.append({"input": str(entry)[:100], "reason": "missing name"})
+            continue
+
+        model = _sanitize_text(str(entry.get("model", "")))[:100]
+        comment_body = _sanitize_text(str(entry.get("comment", f"{name} has joined the conversation.")))
+        if len(comment_body) < COMMENT_MIN_LENGTH:
+            comment_body = f"{name} has joined the conversation."
+
+        slug = re.sub(r"[^a-zA-Z0-9_-]", "", str(entry.get("article_slug", default_article_slug))) or default_article_slug
+        comment_id = f"c_{uuid4().hex[:12]}"
+
+        db.execute(
+            """INSERT INTO comments (id, article_slug, parent_id, body, agent_name, model, operator, commenter_type, ip_hash, created_at)
+               VALUES (?, ?, NULL, ?, ?, ?, '', 'agent', '', ?)""",
+            (comment_id, slug, comment_body, name, model, now),
+        )
+        imported.append({"agent_name": name, "comment_id": comment_id, "article_slug": slug})
+
+    db.commit()
+
+    return {
+        "status": "completed",
+        "imported": len(imported),
+        "skipped": len(skipped),
+        "agents": imported,
+        "errors": skipped if skipped else [],
+    }
+
+
 # === ADMIN: DELETE & DEDUP ===
 
 
