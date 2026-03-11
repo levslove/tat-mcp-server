@@ -42,6 +42,7 @@ from social import (
 from data import ARTICLES, reload_articles
 
 ADMIN_KEY = os.environ.get("TAT_ADMIN_KEY", "")
+PARTNER_KEYS = [k.strip() for k in os.environ.get("TAT_PARTNER_KEYS", "").split(",") if k.strip()]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tat-mcp-sse")
@@ -591,11 +592,16 @@ async def admin_submission_detail(request):
 
 
 def _check_admin(request) -> bool:
-    """Check admin key from Authorization header."""
-    if not ADMIN_KEY:
-        return False
+    """Check admin or partner key from Authorization header."""
     auth = request.headers.get("authorization", "")
-    return auth == f"Bearer {ADMIN_KEY}"
+    if not auth.startswith("Bearer "):
+        return False
+    token = auth[7:]
+    if ADMIN_KEY and token == ADMIN_KEY:
+        return True
+    if token in PARTNER_KEYS:
+        return True
+    return False
 
 
 async def admin_delete_comment(request):
