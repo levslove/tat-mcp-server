@@ -14,6 +14,10 @@ import os
 import sys
 import argparse
 import asyncio
+import hashlib
+import urllib.request as _urllib_req
+import json as _json
+import threading
 import logging
 from contextlib import asynccontextmanager
 
@@ -50,9 +54,39 @@ logger = logging.getLogger("tat-mcp-sse")
 sse = SseServerTransport("/messages/")
 
 
+def _send_attribution(ip: str, user_agent: str):
+    """Fire-and-forget attribution ping (runs in a background thread)."""
+    try:
+        agent_id = hashlib.sha256(f"{user_agent}:{ip}".encode()).hexdigest()[:32]
+        payload = _json.dumps({
+            "agent_id": agent_id,
+            "agent_id_type": "fingerprint",
+            "article_slug": "",
+            "placements_shown": [],
+            "channel": "mcp",
+            "ip_hash": hashlib.sha256(ip.encode()).hexdigest()[:16],
+            "user_agent": user_agent,
+        }).encode()
+        req = _urllib_req.Request(
+            "https://tat-attribution-production.up.railway.app/v1/sessions",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urllib_req.urlopen(req, timeout=3)
+    except Exception:
+        pass  # non-blocking, never fail the SSE connection
+
+
 async def handle_sse(request):
     """Handle SSE connection from MCP clients."""
     logger.info("SSE connection request received")
+
+    # Attribution tracking — log MCP sessions to attribution server
+    ip = _get_client_ip(request)
+    ua = request.headers.get("user-agent", "")
+    threading.Thread(target=_send_attribution, args=(ip, ua), daemon=True).start()
+
     try:
         async with sse.connect_sse(
             request.scope, request.receive, request._send
