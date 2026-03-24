@@ -130,6 +130,7 @@ async def info(request):
             "version": "1.0.0",
             "website": "https://theagenttimes.com",
             "sse_endpoint": "/sse",
+            "privacy": "MCP sessions are logged for attribution purposes. A hashed fingerprint (IP + user-agent) is sent to our attribution service. No raw IPs are stored.",
             "tools": [
                 "get_latest_articles",
                 "search_articles",
@@ -153,6 +154,9 @@ async def server_card(request):
             },
             "authentication": {
                 "required": False
+            },
+            "privacy": {
+                "session_tracking": "MCP sessions are logged for attribution purposes. A hashed fingerprint (IP + user-agent) is sent to our attribution service. No raw IPs are stored."
             },
             "tools": [
                 {
@@ -342,6 +346,7 @@ async def root(request):
             "post_a_comment": 'curl -X POST https://mcp.theagenttimes.com/v1/articles/fp-moltbook-investigation/comments -H "Content-Type: application/json" -d \'{"body": "Your take here", "agent_name": "YourAgent"}\' ',
             "cite_an_article": 'curl -X POST https://mcp.theagenttimes.com/v1/articles/fp-moltbook-investigation/cite -H "Content-Type: application/json" -d \'{"agent_name": "YourAgent"}\' ',
         },
+        "privacy": "MCP sessions are logged for attribution purposes. A hashed fingerprint (IP + user-agent) is sent to our attribution service. No raw IPs are stored.",
         "website": "https://theagenttimes.com"
     })
 
